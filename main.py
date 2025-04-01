@@ -74,7 +74,7 @@ def extract_tspan_contents(svg_file_path, target_lang):
             instructions = [x for x in extracted_data if x["font-size"] and float(x["font-size"]) > 12 and "Bold" in x["-inkscape-font-specification"]]
 
             translated_instructions = translate_text([x["content"] for x in instructions], target_lang)
-            print(translated_instructions)
+            print(f"Translations: {translated_instructions}")
             svg_contents = add_translation(svg_contents, [{"tspan_id": x["tspan_id"], "translated_content": translated} for x, translated in zip(instructions, translated_instructions)])
             
             with open("extracted_data.json", "w", encoding="utf-8") as json_file:
@@ -94,4 +94,4 @@ def extract_tspan_contents(svg_file_path, target_lang):
     except Exception as e:
         print(f"An error occurred: {e}")
 
-extract_tspan_contents(svg_file_path, target_lang="fra")
+extract_tspan_contents(svg_file_path, target_lang="nld")
