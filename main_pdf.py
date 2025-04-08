@@ -4,6 +4,7 @@ from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
 import time
 from spire.pdf.common import *
 from spire.pdf import *
+import fasttext
 
 def add_id_to_text_elements(svg_contents):
     text_elements = re.findall(r"<text[^>]*>.*?</text>", svg_contents, re.DOTALL)
@@ -50,27 +51,30 @@ def split_text_elements(svg_contents, instructions):
     
     return svg_contents
 
+def get_src_lang(text):
+    model = fasttext.load_model("lid218e.bin")
+    predictions = model.predict(text, k=1)
+    lang_code = predictions[0][0].split("__")[-1]
+    print(f"Detected source language: {lang_code} (confidence: {predictions[1][0]})")
+    return lang_code
+
 def translate_text(text_list, target_lang="en", batch_size=8):
     translations = []
-    translator = pipeline('translation', model=model, tokenizer=tokenizer, tgt_lang=target_lang, max_length=512)
-    for i in range(0, len(text_list), batch_size):
-        batch = text_list[i:i+batch_size]
-        # batch = [">>" + target_lang + "<< " + text for text in batch]
-        print(f"Translating batch {i // batch_size + 1}: {batch}")
-        
-        inputs = tokenizer(batch, return_tensors="pt", padding=True, truncation=True).to(model.device)
 
+    translator = pipeline('translation', model=model, tokenizer=tokenizer, src_lang=get_src_lang(" ".join(text_list)), tgt_lang=target_lang, max_length=512)
+    for i in range(0, len(text_list), batch_size):
+        batch = text_list[i:i + batch_size]
+        print(f"Translating batch {i // batch_size + 1} / {len(text_list) // batch_size + 1}")
+        
+        
         with autocast('cuda'):
             try:
-                output = model.generate(**inputs, max_length=512)
+                outputs = translator(batch, max_length=512)
+                translations.extend([output['translation_text'] for output in outputs])
             except Exception as e:
                 print(f"Error during model generation: {e}")
-                translations.extend([""] * len(batch))  # fallback
+                translations.extend(batch)  # Append original texts in case of error
                 continue
-
-        decoded = [tokenizer.decode(t, skip_special_tokens=True) for t in output]
-        translations.extend(decoded)
-    
     return translations
 
 def add_translation(svg_contents, instructions):
@@ -79,6 +83,13 @@ def add_translation(svg_contents, instructions):
         translated_content = instruction["translated_content"]
         svg_contents = re.sub(rf'(<text[^>]*id="{text_id}"[^>]*>)(.*?)</text>', lambda match: f"{match.group(1)}{translated_content}</text>", svg_contents, count=1)
     return svg_contents
+
+def format_content(content):
+    content = re.search(r'<text.*?>(.*?)</text>', content, re.DOTALL).group(1)
+    content = content.replace("&#160;", " ")
+    content = content.strip()
+    print(f"Formatted content: {content}")
+    return content
 
 def get_instructions(svg_contents):
     text_elements = re.findall(r"<text[^>]*>.*?</text>", svg_contents, re.DOTALL)
@@ -92,16 +103,17 @@ def get_instructions(svg_contents):
             x_matrix, y_matrix = matrix_match.group(1).split(" ")[-2:]
         else:
             print(f"Warning: No matrix found in text element {i}")
-            x_matrix, y_matrix = "0", "0"  # Default values or handle as needed
-        content = re.search(r'<text.*?>(.*?)</text>', text_elements[i], re.DOTALL).group(1).replace("&#160;", " ")
-        instructions.append(
-            {
-                "text_id": id_match,
-                "content": content,
-                "x_matrix": x_matrix,
-                "y_matrix": y_matrix,
-            }
-        )
+            x_matrix, y_matrix = "0", "0"
+        content = format_content(text_elements[i])
+        if len(content) > 0 and not content.isnumeric():
+            instructions.append(
+                {
+                    "text_id": id_match,
+                    "content": content,
+                    "x_matrix": x_matrix,
+                    "y_matrix": y_matrix,
+                }
+            )
     
     return [
         x for x in instructions
@@ -111,16 +123,16 @@ def get_instructions(svg_contents):
         and (float(x["y_matrix"]) >= 30 and float(x["y_matrix"]) <= 815)
     ]
 
-def remove_tspan_coordinates(svg_contents, instructions):
+def remove_text_coordinates(svg_contents, instructions):
     for instruction in instructions:
         text_id = instruction["text_id"]
         svg_contents = re.sub(
-            rf'(<tspan[^>]*id="{text_id}"[^>]*?)\s*x="[^"]*"([^>]*>)',
+            rf'(<text[^>]*id="{text_id}"[^>]*?)\s*x="[^"]*"([^>]*>)',
             r'\1\2',
             svg_contents
         )
         svg_contents = re.sub(
-            rf'(<tspan[^>]*id="{text_id}"[^>]*?)\s*y="[^"]*"([^>]*>)',
+            rf'(<text[^>]*id="{text_id}"[^>]*?)\s*y="[^"]*"([^>]*>)',
             r'\1\2',
             svg_contents
         )
@@ -162,7 +174,7 @@ def main(svg_contents, target_lang):
     svg_contents = add_translation(svg_contents, [{"text_id": x["text_id"], "translated_content": translated} for x, translated in zip(instructions, translated_instructions)])
     
     # Remove x and y coordinates from instruction tspan elements
-    # svg_contents = remove_tspan_coordinates(svg_contents, instructions)
+    svg_contents = remove_text_coordinates(svg_contents, instructions)
     
     return svg_contents
 
