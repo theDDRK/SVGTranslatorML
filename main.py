@@ -1,14 +1,20 @@
-import json
 import re
+from torch.amp import autocast
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+import time
+from spire.pdf.common import *
+from spire.pdf import *
 
-svg_file_path = "10005187_REV-03-DT048336.svg"
-tokenizer = AutoTokenizer.from_pretrained("Helsinki-NLP/opus-mt-tc-bible-big-mul-mul")
-model = AutoModelForSeq2SeqLM.from_pretrained("Helsinki-NLP/opus-mt-tc-bible-big-mul-mul")
-
-def split_text_elements(svg_contents):
+def split_text_elements(svg_contents, instructions):
     text_elements = re.findall(r"<text[^>]*>.*?</text>", svg_contents, re.DOTALL)
     print(f"Found {len(text_elements)} text elements")
+
+    text_elements = [
+        text_element for text_element in text_elements if any(
+            instruction["tspan_id"] in text_element for instruction in instructions
+        )
+    ]
+    print(f"Filtered {len(text_elements)} text elements with tspan id")
     
     for i in range(len(text_elements)):
         original_text_element = text_elements[i]
@@ -37,7 +43,8 @@ def split_text_elements(svg_contents):
 def translate_text(text_list, target_lang="en"):
     text_list = [">>" + target_lang + "<< " + text for text in text_list]
     inputs = tokenizer(text_list, return_tensors="pt", padding=True)
-    translated = model.generate(**inputs)
+    with autocast('cuda'):
+        translated = model.generate(**inputs)
     return [tokenizer.decode(t, skip_special_tokens=True) for t in translated]
 
 def add_translation(svg_contents, instructions):
@@ -47,51 +54,109 @@ def add_translation(svg_contents, instructions):
         svg_contents = re.sub(rf'(<tspan[^>]*id="{tspan_id}"[^>]*>)(.*?)</tspan>', lambda match: f"{match.group(1)}{translated_content}</tspan>", svg_contents, count=1)
     return svg_contents
 
+def get_instructions(svg_contents):
+    tspan_matches = re.findall(
+        r"<text.*?style=\"(.*?)\".*?>.*?<tspan.*?id=\"(.*?)\".*?>(.*?)</tspan>.*?</text>", 
+        svg_contents, re.DOTALL
+    )
+    instructions = [
+        {
+            "tspan_id": tspan_id,
+            "content": content,
+            "font-size": font_size.group(1) if (font_size := re.search(r"font-size:([\d.]+)", style)) else None,
+            "-inkscape-font-specification": font_spec.group(1) if (font_spec := re.search(r"-inkscape-font-specification:([^;]+)", style)) else None
+        }
+        for style, tspan_id, content in tspan_matches
+    ]
+    return [
+        x for x in instructions
+        if x["font-size"] and float(x["font-size"]) > 12 and "Bold" in x["-inkscape-font-specification"]
+    ]
 
-def extract_tspan_contents(svg_file_path, target_lang):
+def remove_tspan_coordinates(svg_contents, instructions):
+    for instruction in instructions:
+        tspan_id = instruction["tspan_id"]
+        svg_contents = re.sub(
+            rf'(<tspan[^>]*id="{tspan_id}"[^>]*?)\s*x="[^"]*"([^>]*>)',
+            r'\1\2',
+            svg_contents
+        )
+        svg_contents = re.sub(
+            rf'(<tspan[^>]*id="{tspan_id}"[^>]*?)\s*y="[^"]*"([^>]*>)',
+            r'\1\2',
+            svg_contents
+        )
+    return svg_contents
+
+def open_svg_file(svg_file_path):
     try:
-        with open(svg_file_path, "r", encoding="utf-8") as svg_file:
-            svg_contents = svg_file.read()
-            svg_contents = split_text_elements(svg_contents)
-            
-            tspan_matches = re.findall(
-                r"<text.*?style=\"(.*?)\".*?>.*?<tspan.*?id=\"(.*?)\".*?>(.*?)</tspan>.*?</text>", 
-                svg_contents, re.DOTALL
-            )
-            
-            extracted_data = []
-            for style, tspan_id, content in tspan_matches:
-                font_size = re.search(r"font-size:([\d.]+)", style)
-                font_spec = re.search(r"-inkscape-font-specification:([^;]+)", style)
-                extracted_data.append({
-                    "tspan_id": tspan_id,
-                    "content": content,
-                    "font-size": font_size.group(1) if font_size else None,
-                    "-inkscape-font-specification": font_spec.group(1) if font_spec else None
-                })
-            
-            extracted_data.sort(key=lambda x: (x["-inkscape-font-specification"], -float(x["font-size"]) if x["font-size"] else 0))
-            instructions = [x for x in extracted_data if x["font-size"] and float(x["font-size"]) > 12 and "Bold" in x["-inkscape-font-specification"]]
-
-            translated_instructions = translate_text([x["content"] for x in instructions], target_lang)
-            print(f"Translations: {translated_instructions}")
-            svg_contents = add_translation(svg_contents, [{"tspan_id": x["tspan_id"], "translated_content": translated} for x, translated in zip(instructions, translated_instructions)])
-            
-            with open("extracted_data.json", "w", encoding="utf-8") as json_file:
-                json.dump(extracted_data, json_file, ensure_ascii=False, indent=4)
-            with open("instructions.json", "w", encoding="utf-8") as json_file:
-                json.dump(instructions, json_file, ensure_ascii=False, indent=4)
-            
-            modified_svg_contents = re.sub(r'(<tspan[^>]*?)\s*x="[^"]*"([^>]*>)', r'\1\2', svg_contents)
-            modified_svg_contents = re.sub(r'(<tspan[^>]*?)\s*y="[^"]*"([^>]*>)', r'\1\2', modified_svg_contents)
-            
-            modified_svg_file_path = svg_file_path.replace(".svg", "_modified.svg")
-            with open(modified_svg_file_path, "w", encoding="utf-8") as modified_svg_file:
-                modified_svg_file.write(modified_svg_contents)
-    
+        with open(svg_file_path + ".svg", "r", encoding="utf-8") as svg_file:
+            return svg_file.read()
     except FileNotFoundError:
         print(f"Error: The file '{svg_file_path}' was not found.")
+        return None
     except Exception as e:
         print(f"An error occurred: {e}")
 
-extract_tspan_contents(svg_file_path, target_lang="nld")
+def write_svg_file(svg_file_path, svg_contents):
+    try:
+        with open(svg_file_path, "w", encoding="utf-8") as svg_file:
+            svg_file.write(svg_contents)
+    except Exception as e:
+        print(f"An error occurred while writing the file: {e}")
+
+def main(svg_contents, target_lang):
+    # Extract instructions from the SVG contents
+    instructions = get_instructions(svg_contents)
+    # Split text elements if they contain multiple tspan elements
+    svg_contents = split_text_elements(svg_contents, instructions)
+    # Extract instructions again after splitting
+    instructions = get_instructions(svg_contents)
+
+    # Translate the text content
+    translated_instructions = translate_text([x["content"] for x in instructions], target_lang)
+    print(f"Translations: {translated_instructions}")
+    # Replace the original text with the translated text in the SVG contents
+    svg_contents = add_translation(svg_contents, [{"tspan_id": x["tspan_id"], "translated_content": translated} for x, translated in zip(instructions, translated_instructions)])
+    
+    # Remove x and y coordinates from instruction tspan elements
+    svg_contents = remove_tspan_coordinates(svg_contents, instructions)
+    
+    return svg_contents
+
+def convert_pdf_to_svg(pdf_file_path):
+    try:
+        doc = PdfDocument()
+        doc.LoadFromFile(pdf_file_path + ".pdf")
+        doc.SaveToFile(pdf_file_path + ".svg", FileFormat.SVG)
+        doc.Close()
+    except FileNotFoundError:
+        print(f"Error: The file '{pdf_file_path}' was not found.")
+    except Exception as e:
+        print(f"An error occurred while converting PDF to SVG: {e}")
+
+
+if __name__ == "__main__":
+    # file = "files/test"
+    # convert_pdf_to_svg(file)
+
+    file = "10005187_REV-03-DT048336"
+    target_lang = "nld"
+
+    model_name = "Helsinki-NLP/opus-mt-tc-bible-big-mul-mul"
+    # model_name = "facebook/m2m100_418M"
+    # model_name = "facebook/nllb-200-distilled-600M"
+
+
+    model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    
+    start_time = time.time()
+    
+    svg_contents = open_svg_file(file)
+    svg_contents = main(svg_contents, target_lang)
+    write_svg_file(file + f"_{target_lang}.svg", svg_contents)
+    
+    end_time = time.time()
+
+    print("SVG file modified and saved successfully (took {:.2f} seconds)".format(end_time - start_time))
