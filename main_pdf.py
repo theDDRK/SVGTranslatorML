@@ -52,6 +52,7 @@ def split_text_elements(svg_contents, instructions):
     return svg_contents
 
 def get_src_lang(text):
+    # https://dl.fbaipublicfiles.com/nllb/lid/lid218e.bin
     model = fasttext.load_model("lid218e.bin")
     predictions = model.predict(text, k=1)
     lang_code = predictions[0][0].split("__")[-1]
