@@ -5,6 +5,8 @@ import time
 from spire.pdf.common import *
 from spire.pdf import *
 import fasttext
+import ctypes
+import torch
 
 def add_id_to_text_elements(svg_contents):
     text_elements = re.findall(r"<text[^>]*>.*?</text>", svg_contents, re.DOTALL)
@@ -118,9 +120,9 @@ def get_instructions(svg_contents):
     
     return [
         x for x in instructions
-        if not((float(x["x_matrix"]) >= 623 and float(x["y_matrix"]) >= 681)
-        or (float(x["x_matrix"]) < 393 and float(x["y_matrix"]) < 151))
-        and (float(x["x_matrix"]) >= 25 and float(x["x_matrix"]) <= 1160)
+        # if not((float(x["x_matrix"]) >= 623 and float(x["y_matrix"]) >= 681)
+        # or (float(x["x_matrix"]) < 393 and float(x["y_matrix"]) < 151))
+        if (float(x["x_matrix"]) >= 25 and float(x["x_matrix"]) <= 1160)
         and (float(x["y_matrix"]) >= 30 and float(x["y_matrix"]) <= 815)
     ]
 
@@ -183,8 +185,11 @@ def convert_pdf_to_svg(pdf_file_path):
     try:
         doc = PdfDocument()
         doc.LoadFromFile(pdf_file_path + ".pdf")
+        page_count = doc.Pages.Count
+        print(f"The PDF has {page_count} pages.")
         doc.SaveToFile(pdf_file_path + ".svg", FileFormat.SVG)
         doc.Close()
+        return page_count
     except FileNotFoundError:
         print(f"Error: The file '{pdf_file_path}' was not found.")
     except Exception as e:
@@ -192,23 +197,29 @@ def convert_pdf_to_svg(pdf_file_path):
 
 
 if __name__ == "__main__":
-    file = "files/test"
-    convert_pdf_to_svg(file)
+    ctypes.CDLL(".venv\Lib\site-packages\spire\pdf\lib\libSkiaSharp.dll")
+
+    file = "files/22048310_REV_10_-_22048310-2"
+    page_count = convert_pdf_to_svg(file)
 
     target_lang = "nld_Latn"
     # model_name = "Helsinki-NLP/opus-mt-tc-bible-big-mul-mul"
     # model_name = "facebook/m2m100_418M"
     model_name = "facebook/nllb-200-distilled-600M"
 
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    model = AutoModelForSeq2SeqLM.from_pretrained(model_name).to("cuda")
+    model = AutoModelForSeq2SeqLM.from_pretrained(model_name).to(device)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     
     start_time = time.time()
     
-    svg_contents = open_svg_file(file)
-    svg_contents = main(svg_contents, target_lang)
-    write_svg_file(file + f"_{target_lang}.svg", svg_contents)
+    for i in range(page_count):
+        if page_count != 1:
+            file = f"files/22048310_REV_10_-_22048310-2_{i + 1}"
+        svg_contents = open_svg_file(file)
+        svg_contents = main(svg_contents, target_lang)
+        write_svg_file(file + f"_{target_lang}.svg", svg_contents)
     
     end_time = time.time()
 
