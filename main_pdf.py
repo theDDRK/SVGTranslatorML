@@ -63,31 +63,29 @@ def get_src_lang(text):
     return lang_code
 
 def translate_text(text_list, target_lang="en", batch_size=8):
-    from datasets import Dataset
-    from transformers import pipeline
-
-    # Detect source language (jouw eigen functie)
+    # Detect source language
     src_lang = get_src_lang(" ".join(text_list))
 
     # Dataset object
     dataset = Dataset.from_dict({"text": text_list})
 
-    # Pipeline
+    # Pipeline with batch size
     translator = pipeline(
         "translation",
         model=model,
         tokenizer=tokenizer,
         device=0 if device == "cuda" else -1,
         src_lang=src_lang,
-        tgt_lang=target_lang
+        tgt_lang=target_lang,
+        batch_size=batch_size
     )
 
-    # Wrapper zodat de pipeline het juiste type input krijgt
+    # Wrapper so the pipeline gets the correct input type
     def apply_translation(batch):
         outputs = translator(batch["text"], max_length=512)
         return {"translation_text": [o["translation_text"] for o in outputs]}
 
-    # Map met batching
+    # Map with batching
     translated_dataset = dataset.map(
         apply_translation,
         batched=True,
