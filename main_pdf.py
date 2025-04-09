@@ -7,6 +7,7 @@ from spire.pdf import *
 import fasttext
 import ctypes
 import torch
+from datasets import Dataset
 
 def add_id_to_text_elements(svg_contents):
     text_elements = re.findall(r"<text[^>]*>.*?</text>", svg_contents, re.DOTALL)
@@ -62,23 +63,39 @@ def get_src_lang(text):
     return lang_code
 
 def translate_text(text_list, target_lang="en", batch_size=8):
-    translations = []
+    from datasets import Dataset
+    from transformers import pipeline
 
-    translator = pipeline('translation', model=model, tokenizer=tokenizer, src_lang=get_src_lang(" ".join(text_list)), tgt_lang=target_lang, max_length=512)
-    for i in range(0, len(text_list), batch_size):
-        batch = text_list[i:i + batch_size]
-        print(f"Translating batch {i // batch_size + 1} / {len(text_list) // batch_size + 1}")
-        
-        
-        with autocast('cuda'):
-            try:
-                outputs = translator(batch, max_length=512)
-                translations.extend([output['translation_text'] for output in outputs])
-            except Exception as e:
-                print(f"Error during model generation: {e}")
-                translations.extend(batch)  # Append original texts in case of error
-                continue
-    return translations
+    # Detect source language (jouw eigen functie)
+    src_lang = get_src_lang(" ".join(text_list))
+
+    # Dataset object
+    dataset = Dataset.from_dict({"text": text_list})
+
+    # Pipeline
+    translator = pipeline(
+        "translation",
+        model=model,
+        tokenizer=tokenizer,
+        device=0 if device == "cuda" else -1,
+        src_lang=src_lang,
+        tgt_lang=target_lang
+    )
+
+    # Wrapper zodat de pipeline het juiste type input krijgt
+    def apply_translation(batch):
+        outputs = translator(batch["text"], max_length=512)
+        return {"translation_text": [o["translation_text"] for o in outputs]}
+
+    # Map met batching
+    translated_dataset = dataset.map(
+        apply_translation,
+        batched=True,
+        batch_size=batch_size,
+        remove_columns=["text"]
+    )
+
+    return translated_dataset["translation_text"]
 
 def add_translation(svg_contents, instructions):
     for instruction in instructions:
@@ -177,7 +194,7 @@ def main(svg_contents, target_lang):
     svg_contents = add_translation(svg_contents, [{"text_id": x["text_id"], "translated_content": translated} for x, translated in zip(instructions, translated_instructions)])
     
     # Remove x and y coordinates from instruction tspan elements
-    svg_contents = remove_text_coordinates(svg_contents, instructions)
+    # svg_contents = remove_text_coordinates(svg_contents, instructions)
     
     return svg_contents
 
@@ -199,7 +216,7 @@ def convert_pdf_to_svg(pdf_file_path):
 if __name__ == "__main__":
     ctypes.CDLL(".venv\Lib\site-packages\spire\pdf\lib\libSkiaSharp.dll")
 
-    file = "files/22048310_REV_10_-_22048310-2"
+    file = "files/test"
     page_count = convert_pdf_to_svg(file)
 
     target_lang = "nld_Latn"
