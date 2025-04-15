@@ -66,34 +66,51 @@ def translate_text(text_list, target_lang="en", batch_size=8):
     # Detect source language
     src_lang = get_src_lang(" ".join(text_list))
 
-    # Dataset object
-    dataset = Dataset.from_dict({"text": text_list})
+    # Add special tokens to tokenizer and resize model
+    special_tokens = {"additional_special_tokens": ["<CTX_START>", "<CTX_END>"]}
+    tokenizer.add_special_tokens(special_tokens)
+    model.resize_token_embeddings(len(tokenizer))
 
-    # Pipeline with batch size
+    # Define context sentence
+    context_sentence = "This document contains technical instructions related to bicycle maintenance and repair, including component names, assembly steps, and safety warnings;"
+    start_marker = "<CTX_START>"
+    end_marker = "<CTX_END>"
+
+    # Inject context into texts
+    context_texts = [f"{start_marker} {context_sentence} {end_marker} {text}" for text in text_list]
+
+    # Translation pipeline
     translator = pipeline(
         "translation",
         model=model,
         tokenizer=tokenizer,
-        device=0 if device == "cuda" else -1,
+        device=0 if torch.cuda.is_available() else -1,
         src_lang=src_lang,
         tgt_lang=target_lang,
         batch_size=batch_size
     )
 
-    # Wrapper so the pipeline gets the correct input type
-    def apply_translation(batch):
-        outputs = translator(batch["text"], max_length=512)
-        return {"translation_text": [o["translation_text"] for o in outputs]}
+    # Perform translation
+    translated_outputs = translator(context_texts, max_length=512)
 
-    # Map with batching
-    translated_dataset = dataset.map(
-        apply_translation,
-        batched=True,
-        batch_size=batch_size,
-        remove_columns=["text"]
-    )
+    translated_texts = []
+    for original, output in zip(context_texts, translated_outputs):
+        full_translation = output["translation_text"].strip()
 
-    return translated_dataset["translation_text"]
+        # Zoek de vertaalde contextzin in de output en knip de tekst daarna
+        # Omdat we niet weten hoe de contextzin precies vertaald is, zoeken we op basis van positie:
+        # We nemen aan dat alles NA de contextzin hoort bij de originele tekst.
+
+        # Heuristisch: knip alles tot de eerste puntkomma of regel na de contextzin
+        if ";" in full_translation:
+            parts = full_translation.split(";", 1)
+            translated = parts[1].strip()
+        else:
+            translated = full_translation
+
+        translated_texts.append(translated)
+
+    return translated_texts
 
 def add_translation(svg_contents, instructions):
     for instruction in instructions:
@@ -106,7 +123,6 @@ def format_content(content):
     content = re.search(r'<text.*?>(.*?)</text>', content, re.DOTALL).group(1)
     content = content.replace("&#160;", " ")
     content = content.strip()
-    print(f"Formatted content: {content}")
     return content
 
 def get_instructions(svg_contents):
@@ -192,17 +208,17 @@ def main(svg_contents, target_lang):
     svg_contents = add_translation(svg_contents, [{"text_id": x["text_id"], "translated_content": translated} for x, translated in zip(instructions, translated_instructions)])
     
     # Remove x and y coordinates from instruction tspan elements
-    # svg_contents = remove_text_coordinates(svg_contents, instructions)
+    svg_contents = remove_text_coordinates(svg_contents, instructions)
     
     return svg_contents
 
 def convert_pdf_to_svg(pdf_file_path):
     try:
         doc = PdfDocument()
-        doc.LoadFromFile(pdf_file_path + ".pdf")
+        doc.LoadFromFile(pdf_file_path)
         page_count = doc.Pages.Count
         print(f"The PDF has {page_count} pages.")
-        doc.SaveToFile(pdf_file_path + ".svg", FileFormat.SVG)
+        doc.SaveToFile(pdf_file_path.replace(".pdf", ".svg"), FileFormat.SVG)
         doc.Close()
         return page_count
     except FileNotFoundError:
@@ -214,10 +230,18 @@ def convert_pdf_to_svg(pdf_file_path):
 if __name__ == "__main__":
     ctypes.CDLL(".venv\Lib\site-packages\spire\pdf\lib\libSkiaSharp.dll")
 
-    file = "files/test"
-    page_count = convert_pdf_to_svg(file)
+    file = "files/24113846_REV 00 - 24113846-2_nld_Latn.svg"
 
-    target_lang = "nld_Latn"
+    if file.endswith(".pdf"):
+        page_count = convert_pdf_to_svg(file)
+        file = file.replace(".pdf", "")
+    elif file.endswith(".svg"):
+        page_count = 1
+        file = file.replace(".svg", "")
+    else:
+        raise ValueError("File must be a PDF or SVG file.")
+
+    target_lang = "eng_Latn"
     # model_name = "Helsinki-NLP/opus-mt-tc-bible-big-mul-mul"
     # model_name = "facebook/m2m100_418M"
     model_name = "facebook/nllb-200-distilled-600M"
@@ -231,7 +255,7 @@ if __name__ == "__main__":
     
     for i in range(page_count):
         if page_count != 1:
-            file = f"files/22048310_REV_10_-_22048310-2_{i + 1}"
+            file = f"{file}_{i + 1}"
         svg_contents = open_svg_file(file)
         svg_contents = main(svg_contents, target_lang)
         write_svg_file(file + f"_{target_lang}.svg", svg_contents)
