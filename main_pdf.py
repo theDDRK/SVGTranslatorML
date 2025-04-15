@@ -97,11 +97,6 @@ def translate_text(text_list, target_lang="en", batch_size=8):
     for original, output in zip(context_texts, translated_outputs):
         full_translation = output["translation_text"].strip()
 
-        # Zoek de vertaalde contextzin in de output en knip de tekst daarna
-        # Omdat we niet weten hoe de contextzin precies vertaald is, zoeken we op basis van positie:
-        # We nemen aan dat alles NA de contextzin hoort bij de originele tekst.
-
-        # Heuristisch: knip alles tot de eerste puntkomma of regel na de contextzin
         if ";" in full_translation:
             parts = full_translation.split(";", 1)
             translated = parts[1].strip()
@@ -230,7 +225,7 @@ def convert_pdf_to_svg(pdf_file_path):
 if __name__ == "__main__":
     ctypes.CDLL(".venv\Lib\site-packages\spire\pdf\lib\libSkiaSharp.dll")
 
-    file = "files/24113846_REV 00 - 24113846-2_nld_Latn.svg"
+    file = "files/24113846_REV 00 - 24113846-2.pdf"
 
     if file.endswith(".pdf"):
         page_count = convert_pdf_to_svg(file)
